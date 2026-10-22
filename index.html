@@ -312,7 +312,7 @@ footer { border-top: 1px solid var(--line); padding-block: 20px 28px; color: var
     </label>
     <div class="thumbs" id="f-previews"></div>
     <button class="btn primary" type="submit">Publier l'annonce</button>
-    <p class="proto">Le paiement se fait directement entre vous et l'acheteur. En cas de vente, vous reversez à May'Auto976 5 % du prix de vente.</p>
+    <p class="proto">Le paiement se fait directement entre vous et l'acheteur. En cas de vente, vous reversez à May'Auto976 une commission de 3 % (moins de 10 000 €), 2 % (de 10 000 € à 14 999,99 €) ou 1 % (15 000 € et plus) du prix de vente.</p>
     <p class="proto">Votre annonce sera visible par tous les visiteurs. Votre numéro de téléphone n'est montré qu'aux personnes connectées.</p>
   </form>
 </div>
@@ -387,7 +387,7 @@ footer { border-top: 1px solid var(--line); padding-block: 20px 28px; color: var
     <button class="close" type="button" data-close aria-label="Fermer">✕</button>
     <h2 id="s-head">Mes ventes et commissions</h2>
     <div id="s-body"></div>
-    <p class="proto">Les commissions sont calculées automatiquement (5 %) et visibles par May'Auto976.</p>
+    <p class="proto">Les commissions sont calculées automatiquement selon le prix de vente (3 %, 2 % ou 1 %) et visibles par May'Auto976.</p>
   </div>
 </div>
 
@@ -476,8 +476,10 @@ async function loadListings() {
 var currentUser = null;
 var profile = null;
 var sb = null;
-var RATE_PCT = 5;
-var RATE = RATE_PCT / 100;
+/* Barème : taux appliqué au prix de vente total (doit rester identique à supabase/commission.sql). */
+function ratePct(p) { return p >= 15000 ? 1 : p >= 10000 ? 2 : 3; }
+function commissionFor(p) { return Math.round(p * ratePct(p)) / 100; }
+var PAY = window.MAYAUTO_CONFIG || {};
 
 function freshState() { return { kind: 'tous', cond: 'tous', seller: 'tous', commune: '', q: '', max: '', sort: 'pertinence' }; }
 var state = freshState();
@@ -590,7 +592,7 @@ function openDetail(id) {
     (canSell ? '<div class="sell"><button class="btn" type="button" id="sold-open">Marquer comme vendu</button>' +
     '<form id="sold-form" hidden><label for="sold-price">Prix de vente final (€)<input id="sold-price" class="field" type="number" min="1" step="1" inputmode="numeric" required value="' + l.price + '"></label>' +
     '<p class="proto" id="sold-calc"></p><button class="btn primary" type="submit">Confirmer la vente</button></form>' +
-    '<p class="proto">' + RATE_PCT + ' % du prix de vente est dû à May\'Auto976.</p></div>' : '') +
+    '<p class="proto">Commission due à May\'Auto976 : 3 % sous 10 000 €, 2 % de 10 000 € à 14 999,99 €, 1 % dès 15 000 €.</p></div>' : '') +
     (canDelete ? '<button class="linkbtn" type="button" id="del-ad">' + (canSell ? 'Supprimer mon annonce' : 'Supprimer cette annonce (administrateur)') + '</button>' : '') + '</div>';
   if ($('d-thumbs')) $('d-thumbs').addEventListener('click', function (e) {
     var b = e.target.closest('[data-ph]'); if (!b) return;
@@ -611,7 +613,7 @@ function openDetail(id) {
   });
   function calc() {
     var p = parseFloat($('sold-price').value);
-    $('sold-calc').textContent = isNaN(p) ? '' : 'Commission à reverser à May\'Auto976 (' + RATE_PCT + ' %) : ' + moneyDec.format(p * RATE);
+    $('sold-calc').textContent = isNaN(p) ? '' : 'Commission à reverser à May\'Auto976 (' + ratePct(p) + ' %) : ' + moneyDec.format(commissionFor(p));
   }
   if (canSell) $('sold-open').addEventListener('click', function () { $('sold-form').hidden = false; $('sold-open').hidden = true; calc(); $('sold-price').focus(); });
   if (canSell) $('sold-price').addEventListener('input', calc);
@@ -639,6 +641,20 @@ function openDetail(id) {
   $('detail').hidden = false;
 }
 function closeAll() { $('detail').hidden = true; $('formwrap').hidden = true; $('saleswrap').hidden = true; $('authwrap').hidden = true; $('adminwrap').hidden = true; }
+function payBlock(rows) {
+  var due = rows.filter(function (r) { return !r.paid; });
+  var ref = due.map(function (r) { return String(r.id).slice(0, 8).toUpperCase(); }).join(', ');
+  var h = '';
+  if (PAY.COMMISSION_IBAN) {
+    h += '<p><strong>Par virement</strong><br>Bénéficiaire : ' + esc(PAY.COMMISSION_HOLDER || "May'Auto976") + '<br>IBAN : <span style="overflow-wrap:anywhere">' + esc(PAY.COMMISSION_IBAN) + '</span>' +
+      (PAY.COMMISSION_BIC ? '<br>BIC : ' + esc(PAY.COMMISSION_BIC) : '') + '<br>Référence à indiquer : ' + esc(ref) + '</p>';
+  }
+  if (PAY.COMMISSION_CARD_URL) {
+    h += '<p><a class="btn primary" href="' + esc(PAY.COMMISSION_CARD_URL) + '" target="_blank" rel="noopener">Payer par carte bancaire</a></p>';
+  }
+  if (!h) h = '<p>Les moyens de paiement de la commission seront communiqués très prochainement.</p>';
+  return '<div class="sell" style="margin-top:12px"><strong>Régler ma commission</strong>' + h + '<p class="proto">Une fois reçue, la commission est marquée « Réglée » par May\'Auto976.</p></div>';
+}
 function renderSales() {
   var rows = listings.filter(function (l) { return l.status === 'sold' && currentUser && l.owner === currentUser.id; });
   rows.sort(function (a, b) { return a.soldAt < b.soldAt ? 1 : -1; });
@@ -651,10 +667,10 @@ function renderSales() {
     if (!r.paid) total += r.commission;
     return '<tr><td>' + esc(r.title) + '<br><span class="city">' + esc(r.city) + ' · ' + new Date(r.soldAt).toLocaleDateString('fr-FR') + '</span></td>' +
       '<td class="num">' + money.format(r.soldPrice) + '</td>' +
-      '<td class="num">' + moneyDec.format(r.commission) + '<br><span class="city">' + (r.paid ? 'Réglée' : 'À régler') + '</span></td></tr>';
+      '<td class="num">' + moneyDec.format(r.commission) + '<br><span class="city">' + ratePct(r.soldPrice) + ' % · ' + (r.paid ? 'Réglée' : 'À régler') + '</span></td></tr>';
   }).join('');
-  $('s-body').innerHTML = '<div class="tablewrap"><table><thead><tr><th>Annonce</th><th class="num">Vendu</th><th class="num">Commission ' + RATE_PCT + ' %</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
-    '<div class="total" style="margin-top:12px"><span>Reste à reverser à May\'Auto976</span><span>' + moneyDec.format(total) + '</span></div>';
+  $('s-body').innerHTML = '<div class="tablewrap"><table><thead><tr><th>Annonce</th><th class="num">Vendu</th><th class="num">Commission</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+    '<div class="total" style="margin-top:12px"><span>Reste à reverser à May\'Auto976</span><span>' + moneyDec.format(total) + '</span></div>' + (total > 0 ? payBlock(rows) : '');
 }
 async function openAdmin() {
   $('adminwrap').hidden = false; $('adm-body').innerHTML = '<div class="empty">Chargement…</div>';
